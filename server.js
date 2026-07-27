@@ -35,7 +35,9 @@ app.get('/session/:id', (req, res) => {
 // ---------- Twitch OAuth ----------
 app.get('/auth/twitch/login', (req, res) => {
   const session = req.query.session;
+  const mobileRedirect = req.query.redirect_uri;
   if (!session || !getSession(session)) return res.status(400).send('Invalid session');
+  updateSession(session, { mobileRedirect });
   const params = new URLSearchParams({
     client_id: TWITCH_CLIENT_ID,
     redirect_uri: TWITCH_REDIRECT_URI,
@@ -76,17 +78,20 @@ app.get('/auth/twitch/callback', async (req, res) => {
       twitchUserId: user ? user.id : null,
       twitchLogin: user ? user.login : null
     });
-    res.redirect(`${APP_SCHEME}://auth?platform=twitch&status=success`);
+    res.redirect(`${updateSession(session, {}).mobileRedirect}?platform=twitch&status=success`);
   } catch (e) {
     console.error('Twitch OAuth failed', e);
-    res.redirect(`${APP_SCHEME}://auth?platform=twitch&status=error`);
+    const s = getSession(session);
+    res.redirect(`${s && s.mobileRedirect}?platform=twitch&status=error`);
   }
 });
 
 // ---------- YouTube (Google) OAuth ----------
 app.get('/auth/youtube/login', (req, res) => {
   const session = req.query.session;
+  const mobileRedirect = req.query.redirect_uri;
   if (!session || !getSession(session)) return res.status(400).send('Invalid session');
+  updateSession(session, { mobileRedirect });
   const params = new URLSearchParams({
     client_id: GOOGLE_CLIENT_ID,
     redirect_uri: GOOGLE_REDIRECT_URI,
@@ -128,10 +133,11 @@ app.get('/auth/youtube/callback', async (req, res) => {
       googleRefresh: tokenData.refresh_token,
       youtubeChannelId: channelId || null
     });
-    res.redirect(`${APP_SCHEME}://auth?platform=youtube&status=success`);
+    res.redirect(`${updateSession(session, {}).mobileRedirect}?platform=youtube&status=success`);
   } catch (e) {
     console.error('YouTube OAuth failed', e);
-    res.redirect(`${APP_SCHEME}://auth?platform=youtube&status=error`);
+    const s = getSession(session);
+    res.redirect(`${s && s.mobileRedirect}?platform=youtube&status=error`);
   }
 });
 
