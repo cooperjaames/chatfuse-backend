@@ -2,7 +2,8 @@ import express from 'express';
 import fetch from 'node-fetch';
 import cors from 'cors';
 import 'dotenv/config';
-import { createSession, getSession, updateSession } from './lib/tokenStore.js';
+import { createSession, getSession, updateSession, createAuthToken, getUserIdForToken, deleteAuthToken } from './lib/tokenStore.js';
+import { createUser, verifyUser, getUserById, publicUser } from './lib/users.js';
 
 const app = express();
 app.use(cors());
@@ -30,6 +31,51 @@ app.get('/session/:id', (req, res) => {
     youtubeConnected: !!s.googleToken,
     youtubeChannelId: s.youtubeChannelId || null
   });
+});
+
+// ---------- ChatFuse accounts (for the paid dashboard) ----------
+function requireAuth(req, res, next) {
+  const authHeader = req.headers.authorization || '';
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+  const userId = token && getUserIdForToken(token);
+  if (!userId) return res.status(401).json({ error: 'Not logged in' });
+  const user = getUserById(userId);
+  if (!user) return res.status(401).json({ error: 'Not logged in' });
+  req.user = user;
+  next();
+}
+
+app.post('/auth/signup', async (req, res) => {
+  const { email, password } = req.body || {};
+  if (!email || !password) return res.status(400).json({ error: 'Email and password are required' });
+  if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
+  try {
+    const user = await createUser(email.toLowerCase().trim(), password);
+    const token = createAuthToken(user.id);
+    res.json({ token, user: publicUser(user) });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/auth/login', async (req, res) => {
+  const { email, password } = req.body || {};
+  if (!email || !password) return res.status(400).json({ error: 'Email and password are required' });
+  const user = await verifyUser(email.toLowerCase().trim(), password);
+  if (!user) return res.status(401).json({ error: 'Incorrect email or password' });
+  const token = createAuthToken(user.id);
+  res.json({ token, user: publicUser(user) });
+});
+
+app.post('/auth/logout', requireAuth, (req, res) => {
+  const authHeader = req.headers.authorization || '';
+  const token = authHeader.slice(7);
+  deleteAuthToken(token);
+  res.json({ ok: true });
+});
+
+app.get('/auth/me', requireAuth, (req, res) => {
+  res.json({ user: publicUser(req.user) });
 });
 
 // ---------- Twitch OAuth ----------
