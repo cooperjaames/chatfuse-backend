@@ -9,7 +9,7 @@
     "express": "^4.19.2",
     "node-fetch": "^3.3.2",
     "dotenv": "^16.4.5",
-    "cors": "^2.8.5"
+    "cors": "^2.8.5",
     "better-sqlite3": "^11.3.0",
     "bcrypt": "^5.1.1"
   }
