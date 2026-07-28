@@ -234,7 +234,7 @@ app.post('/dashboard/send', requireAuth, async (req, res) => {
         const r = await fetch('https://api.kick.com/public/v1/chat', {
           method: 'POST',
           headers: { 'Authorization': `Bearer ${conns.kick.access_token}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ broadcaster_user_id: conns.kick.platform_user_id, content: message, type: 'user' })
+          body: JSON.stringify({ broadcaster_user_id: Number(conns.kick.platform_user_id), content: message, type: 'user' })
         });
         results.kick = r.ok ? 'sent' : await r.text();
       } catch (e) { results.kick = 'error: ' + e.message; }
