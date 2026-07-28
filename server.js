@@ -187,6 +187,104 @@ app.get('/dashboard/data', requireAuth, async (req, res) => {
   res.json(out);
 });
 
+app.post('/dashboard/stream-info', requireAuth, async (req, res) => {
+  const conns = getConnectionsForUser(req.user.id);
+  const { twitch, youtube, kick } = req.body || {};
+  const results = {};
+
+  if (twitch && conns.twitch) {
+    try {
+      const patch = {};
+      if (twitch.title) patch.title = twitch.title;
+      if (twitch.category) {
+        const gr = await fetch(`https://api.twitch.tv/helix/games?name=${encodeURIComponent(twitch.category)}`, {
+          headers: { 'Client-ID': TWITCH_CLIENT_ID, 'Authorization': `Bearer ${conns.twitch.access_token}` }
+        });
+        const gd = await gr.json();
+        const game = gd.data && gd.data[0];
+        if (!game) { results.twitch = 'category not found'; }
+        else patch.game_id = game.id;
+      }
+      if (results.twitch !== 'category not found') {
+        const r = await fetch(`https://api.twitch.tv/helix/channels?broadcaster_id=${conns.twitch.platform_user_id}`, {
+          method: 'PATCH',
+          headers: { 'Client-ID': TWITCH_CLIENT_ID, 'Authorization': `Bearer ${conns.twitch.access_token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(patch)
+        });
+        results.twitch = r.ok ? 'updated' : await r.text();
+      }
+    } catch (e) { results.twitch = 'error: ' + e.message; }
+  }
+
+  if (youtube && conns.youtube && youtube.title) {
+    try {
+      const br = await fetch('https://www.googleapis.com/youtube/v3/liveBroadcasts?part=snippet&broadcastStatus=active&broadcastType=all', {
+        headers: { 'Authorization': `Bearer ${conns.youtube.access_token}` }
+      });
+      const bd = await br.json();
+      const broadcast = bd.items && bd.items[0];
+      if (!broadcast) { results.youtube = 'not live'; }
+      else {
+        const snippet = { ...broadcast.snippet, title: youtube.title };
+        const r = await fetch(`https://www.googleapis.com/youtube/v3/liveBroadcasts?part=snippet`, {
+          method: 'PUT',
+          headers: { 'Authorization': `Bearer ${conns.youtube.access_token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: broadcast.id, snippet })
+        });
+        results.youtube = r.ok ? 'updated' : await r.text();
+      }
+    } catch (e) { results.youtube = 'error: ' + e.message; }
+  }
+
+  if (kick && conns.kick) {
+    try {
+      const patch = {};
+      if (kick.title) patch.stream_title = kick.title;
+      if (kick.category) {
+        const cr = await fetch(`https://api.kick.com/public/v1/categories?search=${encodeURIComponent(kick.category)}`, {
+          headers: { 'Authorization': `Bearer ${conns.kick.access_token}` }
+        });
+        const cd = await cr.json();
+        const category = cd.data && cd.data[0];
+        if (!category) { results.kick = 'category not found'; }
+        else patch.category_id = category.id;
+      }
+      if (results.kick !== 'category not found') {
+        const r = await fetch('https://api.kick.com/public/v1/channels', {
+          method: 'PATCH',
+          headers: { 'Authorization': `Bearer ${conns.kick.access_token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(patch)
+        });
+        results.kick = r.ok ? 'updated' : await r.text();
+      }
+    } catch (e) { results.kick = 'error: ' + e.message; }
+  }
+
+  res.json({ results });
+});
+
+app.get('/dashboard/youtube-chat', requireAuth, async (req, res) => {
+  const conns = getConnectionsForUser(req.user.id);
+  if (!conns.youtube) return res.status(400).json({ error: 'YouTube not connected' });
+  try {
+    const br = await fetch('https://www.googleapis.com/youtube/v3/liveBroadcasts?part=snippet&broadcastStatus=active&broadcastType=all', {
+      headers: { 'Authorization': `Bearer ${conns.youtube.access_token}` }
+    });
+    const bd = await br.json();
+    const broadcast = bd.items && bd.items[0];
+    if (!broadcast) return res.json({ items: [], liveChatId: null });
+    const liveChatId = broadcast.snippet.liveChatId;
+    const { pageToken } = req.query;
+    const r = await fetch(`https://www.googleapis.com/youtube/v3/liveChat/messages?liveChatId=${liveChatId}&part=snippet,authorDetails${pageToken ? '&pageToken=' + pageToken : ''}`, {
+      headers: { 'Authorization': `Bearer ${conns.youtube.access_token}` }
+    });
+    const d = await r.json();
+    res.json({ ...d, liveChatId });
+  } catch (e) {
+    res.status(500).json({ error: 'YouTube chat fetch failed' });
+  }
+});
+
 app.post('/dashboard/send', requireAuth, async (req, res) => {
   const { message, platform } = req.body || {};
   if (!message || !message.trim()) return res.status(400).json({ error: 'Message is empty' });
@@ -288,7 +386,7 @@ app.get('/auth/twitch/login', (req, res) => {
     client_id: TWITCH_CLIENT_ID,
     redirect_uri: TWITCH_REDIRECT_URI,
     response_type: 'code',
-    scope: 'user:write:chat user:read:chat',
+    scope: 'user:write:chat user:read:chat channel:manage:broadcast',
     state: session
   });
   res.redirect(`https://id.twitch.tv/oauth2/authorize?${params}`);
