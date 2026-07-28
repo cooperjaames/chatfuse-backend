@@ -5,7 +5,8 @@ import Stripe from 'stripe';
 import crypto from 'crypto';
 import 'dotenv/config';
 import { createSession, getSession, updateSession, createAuthToken, getUserIdForToken, deleteAuthToken } from './lib/tokenStore.js';
-import { createUser, verifyUser, getUserById, publicUser, linkStripeCustomer, updateSubscriptionByStripeCustomer, linkPlatformConnection, getConnectionsForUser, deletePlatformConnection } from './lib/users.js';
+import { createUser, verifyUser, getUserById, publicUser, linkStripeCustomer, updateSubscriptionByStripeCustomer, linkPlatformConnection, getConnectionsForUser, deletePlatformConnection, updateConnectionTokens } from './lib/users.js';
+import { refreshTwitch, refreshGoogle, refreshKick } from './lib/platformRefresh.js';
 
 const app = express();
 app.use(cors());
@@ -128,8 +129,52 @@ app.delete('/dashboard/connections/:platform', requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
+// Twitch/Google/Kick access tokens all expire (Kick's in ~1hr). Refresh
+// tokens are saved at connect time but were never used — connections would
+// silently die until the streamer manually reconnected. This checks expiry
+// before every use and refreshes just-in-time via each platform's
+// refresh_token grant, persisting the new tokens back to the connection.
+const REFRESH_BUFFER_SECONDS = 60;
+
+async function ensureFreshConnection(userId, platform, conn) {
+  if (!conn) return conn;
+  const now = Math.floor(Date.now() / 1000);
+  if (!conn.expires_at || conn.expires_at - now > REFRESH_BUFFER_SECONDS) return conn;
+  if (!conn.refresh_token) return conn;
+
+  try {
+    let refreshed;
+    if (platform === 'twitch') {
+      refreshed = await refreshTwitch({ refreshToken: conn.refresh_token, clientId: TWITCH_CLIENT_ID, clientSecret: TWITCH_CLIENT_SECRET });
+    } else if (platform === 'youtube') {
+      refreshed = await refreshGoogle({ refreshToken: conn.refresh_token, clientId: GOOGLE_CLIENT_ID, clientSecret: GOOGLE_CLIENT_SECRET });
+    } else if (platform === 'kick') {
+      refreshed = await refreshKick({ refreshToken: conn.refresh_token, clientId: KICK_CLIENT_ID, clientSecret: KICK_CLIENT_SECRET });
+    } else {
+      return conn;
+    }
+
+    const expiresAt = refreshed.expiresIn ? now + refreshed.expiresIn : null;
+    const refreshToken = refreshed.refreshToken || conn.refresh_token;
+    updateConnectionTokens(userId, platform, { accessToken: refreshed.accessToken, refreshToken, expiresAt });
+    return { ...conn, access_token: refreshed.accessToken, refresh_token: refreshToken, expires_at: expiresAt };
+  } catch (e) {
+    console.error(`Token refresh failed for user ${userId} / ${platform}:`, e.message);
+    return conn;
+  }
+}
+
+async function getFreshConnections(userId) {
+  const conns = getConnectionsForUser(userId);
+  const out = {};
+  for (const platform of ['twitch', 'youtube', 'kick']) {
+    if (conns[platform]) out[platform] = await ensureFreshConnection(userId, platform, conns[platform]);
+  }
+  return out;
+}
+
 app.get('/dashboard/data', requireAuth, async (req, res) => {
-  const conns = getConnectionsForUser(req.user.id);
+  const conns = await getFreshConnections(req.user.id);
   const out = { twitch: { connected: false }, youtube: { connected: false }, kick: { connected: false } };
 
   if (conns.twitch) {
@@ -193,7 +238,7 @@ app.get('/dashboard/data', requireAuth, async (req, res) => {
 });
 
 app.get('/dashboard/kick-categories', requireAuth, async (req, res) => {
-  const conns = getConnectionsForUser(req.user.id);
+  const conns = await getFreshConnections(req.user.id);
   if (!conns.kick) return res.status(400).json({ error: 'Kick not connected' });
   const q = req.query.q || '';
   try {
@@ -209,7 +254,7 @@ app.get('/dashboard/kick-categories', requireAuth, async (req, res) => {
 });
 
 app.post('/dashboard/stream-info', requireAuth, async (req, res) => {
-  const conns = getConnectionsForUser(req.user.id);
+  const conns = await getFreshConnections(req.user.id);
   const { twitch, youtube, kick } = req.body || {};
   const results = {};
 
@@ -287,7 +332,7 @@ app.post('/dashboard/stream-info', requireAuth, async (req, res) => {
 });
 
 app.get('/dashboard/youtube-chat', requireAuth, async (req, res) => {
-  const conns = getConnectionsForUser(req.user.id);
+  const conns = await getFreshConnections(req.user.id);
   if (!conns.youtube) return res.status(400).json({ error: 'YouTube not connected' });
   try {
     const br = await fetch('https://www.googleapis.com/youtube/v3/liveBroadcasts?part=snippet&broadcastStatus=active&broadcastType=all', {
@@ -311,7 +356,7 @@ app.get('/dashboard/youtube-chat', requireAuth, async (req, res) => {
 app.post('/dashboard/send', requireAuth, async (req, res) => {
   const { message, platform } = req.body || {};
   if (!message || !message.trim()) return res.status(400).json({ error: 'Message is empty' });
-  const conns = getConnectionsForUser(req.user.id);
+  const conns = await getFreshConnections(req.user.id);
   const targets = platform === 'all' ? ['twitch', 'youtube', 'kick'] : [platform];
   const results = {};
 
@@ -450,6 +495,7 @@ app.get('/auth/twitch/callback', async (req, res) => {
       linkPlatformConnection(s.dashboardUserId, 'twitch', {
         accessToken: tokenData.access_token,
         refreshToken: tokenData.refresh_token,
+        expiresAt: tokenData.expires_in ? Math.floor(Date.now() / 1000) + tokenData.expires_in : null,
         platformUserId: user.id,
         platformLogin: user.login
       });
@@ -514,6 +560,7 @@ app.get('/auth/youtube/callback', async (req, res) => {
       linkPlatformConnection(s.dashboardUserId, 'youtube', {
         accessToken: tokenData.access_token,
         refreshToken: tokenData.refresh_token,
+        expiresAt: tokenData.expires_in ? Math.floor(Date.now() / 1000) + tokenData.expires_in : null,
         platformUserId: channelId || null,
         platformLogin: null
       });
@@ -580,6 +627,7 @@ app.get('/auth/kick/callback', async (req, res) => {
       linkPlatformConnection(s.dashboardUserId, 'kick', {
         accessToken: tokenData.access_token,
         refreshToken: tokenData.refresh_token,
+        expiresAt: tokenData.expires_in ? Math.floor(Date.now() / 1000) + tokenData.expires_in : null,
         platformUserId: user.user_id || user.id,
         platformLogin: user.name || user.username
       });
