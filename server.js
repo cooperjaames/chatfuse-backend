@@ -138,6 +138,7 @@ app.get('/dashboard/data', requireAuth, async (req, res) => {
       out.twitch.viewers = stream ? stream.viewer_count : 0;
       out.twitch.title = stream ? stream.title : null;
       out.twitch.game = stream ? stream.game_name : null;
+      out.twitch.startedAt = stream ? stream.started_at : null;
     } catch (e) { out.twitch.error = 'Could not reach Twitch'; }
   }
 
@@ -156,6 +157,7 @@ app.get('/dashboard/data', requireAuth, async (req, res) => {
         const vd = await vr.json();
         const details = vd.items && vd.items[0] && vd.items[0].liveStreamingDetails;
         out.youtube.viewers = details ? parseInt(details.concurrentViewers || '0', 10) : 0;
+        out.youtube.startedAt = details ? details.actualStartTime : null;
       } else {
         out.youtube.viewers = 0;
       }
