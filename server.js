@@ -492,6 +492,69 @@ app.delete('/dashboard/banned-words/:id', requireAuth, async (req, res) => {
   }
 });
 
+// ---------- Twitch chat pinning (real platform pin, mod-pinned messages API) ----------
+// Shipped by Twitch in open beta 2026-05-15. Only one mod-pinned message can
+// be active per channel at a time — pinning a new one auto-replaces it.
+// Kick and YouTube have no equivalent public API for this (confirmed against
+// their current docs), so pinning there stays a ChatFuse-only UI feature.
+app.get('/dashboard/twitch-pin', requireAuth, async (req, res) => {
+  const conns = await getFreshConnections(req.user.id);
+  if (!conns.twitch) return res.status(400).json({ error: 'Twitch not connected' });
+  try {
+    const r = await fetch(`https://api.twitch.tv/helix/chat/pins?broadcaster_id=${conns.twitch.platform_user_id}&moderator_id=${conns.twitch.platform_user_id}`, {
+      headers: { 'Client-ID': TWITCH_CLIENT_ID, 'Authorization': `Bearer ${conns.twitch.access_token}` }
+    });
+    const d = await r.json();
+    if (!r.ok) return res.status(r.status).json({ error: d.message || 'Could not read pinned message' });
+    res.json({ pinned: (d.data && d.data[0]) || null });
+  } catch (e) {
+    res.status(500).json({ error: 'Could not reach Twitch' });
+  }
+});
+
+app.post('/dashboard/twitch-pin', requireAuth, async (req, res) => {
+  const conns = await getFreshConnections(req.user.id);
+  if (!conns.twitch) return res.status(400).json({ error: 'Twitch not connected' });
+  const { message_id, duration_seconds } = req.body || {};
+  if (!message_id) return res.status(400).json({ error: 'message_id is required' });
+  const params = new URLSearchParams({
+    broadcaster_id: conns.twitch.platform_user_id,
+    moderator_id: conns.twitch.platform_user_id,
+    message_id
+  });
+  if (duration_seconds) params.set('duration_seconds', duration_seconds);
+  try {
+    const r = await fetch(`https://api.twitch.tv/helix/chat/pins?${params}`, {
+      method: 'PUT',
+      headers: { 'Client-ID': TWITCH_CLIENT_ID, 'Authorization': `Bearer ${conns.twitch.access_token}` }
+    });
+    if (!r.ok) { const d = await r.json().catch(() => ({})); return res.status(r.status).json({ error: d.message || 'Could not pin message' }); }
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: 'Could not reach Twitch' });
+  }
+});
+
+app.delete('/dashboard/twitch-pin/:messageId', requireAuth, async (req, res) => {
+  const conns = await getFreshConnections(req.user.id);
+  if (!conns.twitch) return res.status(400).json({ error: 'Twitch not connected' });
+  const params = new URLSearchParams({
+    broadcaster_id: conns.twitch.platform_user_id,
+    moderator_id: conns.twitch.platform_user_id,
+    message_id: req.params.messageId
+  });
+  try {
+    const r = await fetch(`https://api.twitch.tv/helix/chat/pins?${params}`, {
+      method: 'DELETE',
+      headers: { 'Client-ID': TWITCH_CLIENT_ID, 'Authorization': `Bearer ${conns.twitch.access_token}` }
+    });
+    if (!r.ok) { const d = await r.json().catch(() => ({})); return res.status(r.status).json({ error: d.message || 'Could not unpin message' }); }
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: 'Could not reach Twitch' });
+  }
+});
+
 app.post('/dashboard/send', requireAuth, async (req, res) => {
   const { message, platform } = req.body || {};
   if (!message || !message.trim()) return res.status(400).json({ error: 'Message is empty' });
@@ -593,7 +656,7 @@ app.get('/auth/twitch/login', (req, res) => {
     client_id: TWITCH_CLIENT_ID,
     redirect_uri: TWITCH_REDIRECT_URI,
     response_type: 'code',
-    scope: 'user:write:chat user:read:chat channel:manage:broadcast moderator:read:followers channel:read:subscriptions moderator:manage:chat_settings moderator:manage:blocked_terms',
+    scope: 'user:write:chat user:read:chat channel:manage:broadcast moderator:read:followers channel:read:subscriptions moderator:manage:chat_settings moderator:manage:blocked_terms moderator:manage:chat_messages',
     state: session
   });
   res.redirect(`https://id.twitch.tv/oauth2/authorize?${params}`);
