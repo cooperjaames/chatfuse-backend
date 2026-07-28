@@ -192,6 +192,26 @@ app.get('/dashboard/data', requireAuth, async (req, res) => {
       out.twitch.game = stream ? stream.game_name : null;
       out.twitch.startedAt = stream ? stream.started_at : null;
     } catch (e) { out.twitch.error = 'Could not reach Twitch'; }
+
+    // Followers requires moderator:read:followers; sub count requires
+    // channel:read:subscriptions (and Twitch affiliate/partner status).
+    // Both scopes were added after the initial launch, so accounts
+    // connected before that need to disconnect/reconnect once to grant them.
+    try {
+      const fr = await fetch(`https://api.twitch.tv/helix/channels/followers?broadcaster_id=${conns.twitch.platform_user_id}&first=1`, {
+        headers: { 'Client-ID': TWITCH_CLIENT_ID, 'Authorization': `Bearer ${conns.twitch.access_token}` }
+      });
+      const fd = await fr.json();
+      out.twitch.followers = fr.ok ? fd.total : null;
+    } catch (e) { out.twitch.followers = null; }
+
+    try {
+      const sr = await fetch(`https://api.twitch.tv/helix/subscriptions?broadcaster_id=${conns.twitch.platform_user_id}&first=1`, {
+        headers: { 'Client-ID': TWITCH_CLIENT_ID, 'Authorization': `Bearer ${conns.twitch.access_token}` }
+      });
+      const sd = await sr.json();
+      out.twitch.subs = sr.ok ? sd.total : null;
+    } catch (e) { out.twitch.subs = null; }
   }
 
   if (conns.youtube) {
@@ -214,6 +234,15 @@ app.get('/dashboard/data', requireAuth, async (req, res) => {
         out.youtube.viewers = 0;
       }
     } catch (e) { out.youtube.error = 'Could not reach YouTube'; }
+
+    try {
+      const cr = await fetch('https://www.googleapis.com/youtube/v3/channels?part=statistics&mine=true', {
+        headers: { 'Authorization': `Bearer ${conns.youtube.access_token}` }
+      });
+      const cd = await cr.json();
+      const stats = cd.items && cd.items[0] && cd.items[0].statistics;
+      out.youtube.subs = stats && !stats.hiddenSubscriberCount ? parseInt(stats.subscriberCount || '0', 10) : null;
+    } catch (e) { out.youtube.subs = null; }
   }
 
   if (conns.kick) {
@@ -231,9 +260,24 @@ app.get('/dashboard/data', requireAuth, async (req, res) => {
       out.kick.game = stream && stream.category ? stream.category.name : null;
       out.kick.startedAt = stream ? stream.started_at : null;
     } catch (e) { out.kick.error = 'Could not reach Kick'; }
+
+    // Kick's public API has no follower-count field at all (only
+    // active/canceled subscriber counts) — followers stays unavailable
+    // until Kick exposes it.
+    out.kick.followers = null;
+    try {
+      const cr = await fetch(`https://api.kick.com/public/v1/channels?broadcaster_user_id=${conns.kick.platform_user_id}`, {
+        headers: { 'Authorization': `Bearer ${conns.kick.access_token}` }
+      });
+      const cd = await cr.json();
+      const channel = cd.data && cd.data[0];
+      out.kick.subs = channel ? channel.active_subscribers_count : null;
+    } catch (e) { out.kick.subs = null; }
   }
 
   out.totalViewers = (out.twitch.viewers || 0) + (out.youtube.viewers || 0) + (out.kick.viewers || 0);
+  out.totalFollowers = (out.twitch.followers || 0);
+  out.totalSubs = (out.twitch.subs || 0) + (out.youtube.subs || 0) + (out.kick.subs || 0);
   res.json(out);
 });
 
@@ -454,7 +498,7 @@ app.get('/auth/twitch/login', (req, res) => {
     client_id: TWITCH_CLIENT_ID,
     redirect_uri: TWITCH_REDIRECT_URI,
     response_type: 'code',
-    scope: 'user:write:chat user:read:chat channel:manage:broadcast',
+    scope: 'user:write:chat user:read:chat channel:manage:broadcast moderator:read:followers channel:read:subscriptions',
     state: session
   });
   res.redirect(`https://id.twitch.tv/oauth2/authorize?${params}`);
