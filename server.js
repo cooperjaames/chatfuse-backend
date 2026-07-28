@@ -4,7 +4,7 @@ import cors from 'cors';
 import Stripe from 'stripe';
 import 'dotenv/config';
 import { createSession, getSession, updateSession, createAuthToken, getUserIdForToken, deleteAuthToken } from './lib/tokenStore.js';
-import { createUser, verifyUser, getUserById, publicUser, linkStripeCustomer, updateSubscriptionByStripeCustomer } from './lib/users.js';
+import { createUser, verifyUser, getUserById, publicUser, linkStripeCustomer, updateSubscriptionByStripeCustomer, linkPlatformConnection, getConnectionsForUser } from './lib/users.js';
 
 const app = express();
 app.use(cors());
@@ -112,6 +112,60 @@ app.get('/auth/me', requireAuth, (req, res) => {
   res.json({ user: publicUser(req.user) });
 });
 
+// Starts an OAuth session tagged with the logged-in dashboard user, so when
+// the existing Twitch/YouTube callback routes finish, they know to also save
+// the resulting tokens against this account (not just an anonymous session).
+app.post('/dashboard/connect-session', requireAuth, (req, res) => {
+  const session = createSession();
+  updateSession(session, { dashboardUserId: req.user.id });
+  res.json({ session });
+});
+
+app.get('/dashboard/data', requireAuth, async (req, res) => {
+  const conns = getConnectionsForUser(req.user.id);
+  const out = { twitch: { connected: false }, youtube: { connected: false } };
+
+  if (conns.twitch) {
+    out.twitch.connected = true;
+    out.twitch.login = conns.twitch.platform_login;
+    try {
+      const r = await fetch(`https://api.twitch.tv/helix/streams?user_id=${conns.twitch.platform_user_id}`, {
+        headers: { 'Client-ID': TWITCH_CLIENT_ID, 'Authorization': `Bearer ${conns.twitch.access_token}` }
+      });
+      const d = await r.json();
+      const stream = d.data && d.data[0];
+      out.twitch.live = !!stream;
+      out.twitch.viewers = stream ? stream.viewer_count : 0;
+      out.twitch.title = stream ? stream.title : null;
+      out.twitch.game = stream ? stream.game_name : null;
+    } catch (e) { out.twitch.error = 'Could not reach Twitch'; }
+  }
+
+  if (conns.youtube) {
+    out.youtube.connected = true;
+    try {
+      const br = await fetch('https://www.googleapis.com/youtube/v3/liveBroadcasts?part=snippet&broadcastStatus=active&broadcastType=all', {
+        headers: { 'Authorization': `Bearer ${conns.youtube.access_token}` }
+      });
+      const bd = await br.json();
+      const broadcast = bd.items && bd.items[0];
+      out.youtube.live = !!broadcast;
+      if (broadcast) {
+        out.youtube.title = broadcast.snippet.title;
+        const vr = await fetch(`https://www.googleapis.com/youtube/v3/videos?part=liveStreamingDetails&id=${broadcast.id}&key=${YOUTUBE_API_KEY}`);
+        const vd = await vr.json();
+        const details = vd.items && vd.items[0] && vd.items[0].liveStreamingDetails;
+        out.youtube.viewers = details ? parseInt(details.concurrentViewers || '0', 10) : 0;
+      } else {
+        out.youtube.viewers = 0;
+      }
+    } catch (e) { out.youtube.error = 'Could not reach YouTube'; }
+  }
+
+  out.totalViewers = (out.twitch.viewers || 0) + (out.youtube.viewers || 0);
+  res.json(out);
+});
+
 // ---------- Stripe billing ----------
 app.post('/billing/checkout', requireAuth, async (req, res) => {
   if (!stripe) return res.status(500).json({ error: 'Billing is not configured yet' });
@@ -192,6 +246,15 @@ app.get('/auth/twitch/callback', async (req, res) => {
       twitchUserId: user ? user.id : null,
       twitchLogin: user ? user.login : null
     });
+    const s = getSession(session);
+    if (s.dashboardUserId && user) {
+      linkPlatformConnection(s.dashboardUserId, 'twitch', {
+        accessToken: tokenData.access_token,
+        refreshToken: tokenData.refresh_token,
+        platformUserId: user.id,
+        platformLogin: user.login
+      });
+    }
     res.redirect(`${updateSession(session, {}).mobileRedirect}?platform=twitch&status=success`);
   } catch (e) {
     console.error('Twitch OAuth failed', e);
@@ -247,6 +310,15 @@ app.get('/auth/youtube/callback', async (req, res) => {
       googleRefresh: tokenData.refresh_token,
       youtubeChannelId: channelId || null
     });
+    const s = getSession(session);
+    if (s.dashboardUserId) {
+      linkPlatformConnection(s.dashboardUserId, 'youtube', {
+        accessToken: tokenData.access_token,
+        refreshToken: tokenData.refresh_token,
+        platformUserId: channelId || null,
+        platformLogin: null
+      });
+    }
     res.redirect(`${updateSession(session, {}).mobileRedirect}?platform=youtube&status=success`);
   } catch (e) {
     console.error('YouTube OAuth failed', e);
