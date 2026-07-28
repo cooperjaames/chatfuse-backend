@@ -121,8 +121,8 @@ app.post('/billing/checkout', requireAuth, async (req, res) => {
       line_items: [{ price: STRIPE_PRICE_ID, quantity: 1 }],
       customer_email: req.user.email,
       client_reference_id: req.user.id,
-      success_url: `${DASHBOARD_URL}/dashboard?checkout=success`,
-      cancel_url: `${DASHBOARD_URL}/upgrade?checkout=cancelled`
+      success_url: `${DASHBOARD_URL}/?checkout=success`,
+      cancel_url: `${DASHBOARD_URL}/?checkout=cancelled`
     });
     res.json({ url: session.url });
   } catch (e) {
@@ -137,7 +137,7 @@ app.post('/billing/portal', requireAuth, async (req, res) => {
   try {
     const session = await stripe.billingPortal.sessions.create({
       customer: req.user.stripe_customer_id,
-      return_url: `${DASHBOARD_URL}/dashboard`
+      return_url: `${DASHBOARD_URL}/`
     });
     res.json({ url: session.url });
   } catch (e) {
