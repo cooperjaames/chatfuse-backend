@@ -1,19 +1,53 @@
 import express from 'express';
 import fetch from 'node-fetch';
 import cors from 'cors';
+import Stripe from 'stripe';
 import 'dotenv/config';
 import { createSession, getSession, updateSession, createAuthToken, getUserIdForToken, deleteAuthToken } from './lib/tokenStore.js';
-import { createUser, verifyUser, getUserById, publicUser } from './lib/users.js';
+import { createUser, verifyUser, getUserById, publicUser, linkStripeCustomer, updateSubscriptionByStripeCustomer } from './lib/users.js';
 
 const app = express();
 app.use(cors());
-app.use(express.json());
 
 const {
   TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET, TWITCH_REDIRECT_URI,
   GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI,
-  YOUTUBE_API_KEY, APP_SCHEME, PORT
+  YOUTUBE_API_KEY, APP_SCHEME, PORT,
+  STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, STRIPE_PRICE_ID, DASHBOARD_URL
 } = process.env;
+
+const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
+
+// Stripe webhook MUST come before express.json() below — Stripe verifies
+// the request signature against the raw, unparsed body. If express.json()
+// runs first, the body is already consumed/parsed and signature checks fail.
+app.post('/billing/webhook', express.raw({ type: 'application/json' }), (req, res) => {
+  if (!stripe) return res.status(500).send('Stripe not configured');
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(req.body, req.headers['stripe-signature'], STRIPE_WEBHOOK_SECRET);
+  } catch (e) {
+    console.error('Stripe webhook signature check failed', e.message);
+    return res.status(400).send(`Webhook Error: ${e.message}`);
+  }
+
+  if (event.type === 'checkout.session.completed') {
+    const session = event.data.object;
+    if (session.client_reference_id && session.customer) {
+      linkStripeCustomer(session.client_reference_id, session.customer);
+      updateSubscriptionByStripeCustomer(session.customer, 'active');
+    }
+  }
+  if (event.type === 'customer.subscription.updated' || event.type === 'customer.subscription.deleted') {
+    const sub = event.data.object;
+    const status = sub.status === 'active' || sub.status === 'trialing' ? 'active' : 'free';
+    updateSubscriptionByStripeCustomer(sub.customer, status);
+  }
+
+  res.json({ received: true });
+});
+
+app.use(express.json());
 
 // ---------- Session bootstrap ----------
 // The app calls this once on first launch and stores the session id locally.
@@ -76,6 +110,40 @@ app.post('/auth/logout', requireAuth, (req, res) => {
 
 app.get('/auth/me', requireAuth, (req, res) => {
   res.json({ user: publicUser(req.user) });
+});
+
+// ---------- Stripe billing ----------
+app.post('/billing/checkout', requireAuth, async (req, res) => {
+  if (!stripe) return res.status(500).json({ error: 'Billing is not configured yet' });
+  try {
+    const session = await stripe.checkout.sessions.create({
+      mode: 'subscription',
+      line_items: [{ price: STRIPE_PRICE_ID, quantity: 1 }],
+      customer_email: req.user.email,
+      client_reference_id: req.user.id,
+      success_url: `${DASHBOARD_URL}/dashboard?checkout=success`,
+      cancel_url: `${DASHBOARD_URL}/upgrade?checkout=cancelled`
+    });
+    res.json({ url: session.url });
+  } catch (e) {
+    console.error('Stripe checkout creation failed', e);
+    res.status(500).json({ error: 'Could not start checkout' });
+  }
+});
+
+app.post('/billing/portal', requireAuth, async (req, res) => {
+  if (!stripe) return res.status(500).json({ error: 'Billing is not configured yet' });
+  if (!req.user.stripe_customer_id) return res.status(400).json({ error: 'No subscription on file' });
+  try {
+    const session = await stripe.billingPortal.sessions.create({
+      customer: req.user.stripe_customer_id,
+      return_url: `${DASHBOARD_URL}/dashboard`
+    });
+    res.json({ url: session.url });
+  } catch (e) {
+    console.error('Stripe portal creation failed', e);
+    res.status(500).json({ error: 'Could not open billing portal' });
+  }
 });
 
 // ---------- Twitch OAuth ----------
