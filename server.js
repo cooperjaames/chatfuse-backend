@@ -2,6 +2,7 @@ import express from 'express';
 import fetch from 'node-fetch';
 import cors from 'cors';
 import Stripe from 'stripe';
+import crypto from 'crypto';
 import 'dotenv/config';
 import { createSession, getSession, updateSession, createAuthToken, getUserIdForToken, deleteAuthToken } from './lib/tokenStore.js';
 import { createUser, verifyUser, getUserById, publicUser, linkStripeCustomer, updateSubscriptionByStripeCustomer, linkPlatformConnection, getConnectionsForUser } from './lib/users.js';
@@ -12,6 +13,7 @@ app.use(cors());
 const {
   TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET, TWITCH_REDIRECT_URI,
   GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI,
+  KICK_CLIENT_ID, KICK_CLIENT_SECRET, KICK_REDIRECT_URI,
   YOUTUBE_API_KEY, APP_SCHEME, PORT,
   STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, STRIPE_PRICE_ID, DASHBOARD_URL
 } = process.env;
@@ -123,7 +125,7 @@ app.post('/dashboard/connect-session', requireAuth, (req, res) => {
 
 app.get('/dashboard/data', requireAuth, async (req, res) => {
   const conns = getConnectionsForUser(req.user.id);
-  const out = { twitch: { connected: false }, youtube: { connected: false } };
+  const out = { twitch: { connected: false }, youtube: { connected: false }, kick: { connected: false } };
 
   if (conns.twitch) {
     out.twitch.connected = true;
@@ -164,7 +166,24 @@ app.get('/dashboard/data', requireAuth, async (req, res) => {
     } catch (e) { out.youtube.error = 'Could not reach YouTube'; }
   }
 
-  out.totalViewers = (out.twitch.viewers || 0) + (out.youtube.viewers || 0);
+  if (conns.kick) {
+    out.kick.connected = true;
+    out.kick.login = conns.kick.platform_login;
+    try {
+      const r = await fetch(`https://api.kick.com/public/v1/livestreams?broadcaster_user_id=${conns.kick.platform_user_id}`, {
+        headers: { 'Authorization': `Bearer ${conns.kick.access_token}` }
+      });
+      const d = await r.json();
+      const stream = d.data && d.data[0];
+      out.kick.live = !!stream;
+      out.kick.viewers = stream ? stream.viewer_count : 0;
+      out.kick.title = stream ? stream.stream_title : null;
+      out.kick.game = stream && stream.category ? stream.category.name : null;
+      out.kick.startedAt = stream ? stream.started_at : null;
+    } catch (e) { out.kick.error = 'Could not reach Kick'; }
+  }
+
+  out.totalViewers = (out.twitch.viewers || 0) + (out.youtube.viewers || 0) + (out.kick.viewers || 0);
   res.json(out);
 });
 
@@ -172,7 +191,7 @@ app.post('/dashboard/send', requireAuth, async (req, res) => {
   const { message, platform } = req.body || {};
   if (!message || !message.trim()) return res.status(400).json({ error: 'Message is empty' });
   const conns = getConnectionsForUser(req.user.id);
-  const targets = platform === 'all' ? ['twitch', 'youtube'] : [platform];
+  const targets = platform === 'all' ? ['twitch', 'youtube', 'kick'] : [platform];
   const results = {};
 
   for (const p of targets) {
@@ -208,6 +227,17 @@ app.post('/dashboard/send', requireAuth, async (req, res) => {
         });
         results.youtube = r.ok ? 'sent' : await r.text();
       } catch (e) { results.youtube = 'error: ' + e.message; }
+    }
+
+    if (p === 'kick') {
+      try {
+        const r = await fetch('https://api.kick.com/public/v1/chat', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${conns.kick.access_token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ broadcaster_user_id: conns.kick.platform_user_id, content: message, type: 'user' })
+        });
+        results.kick = r.ok ? 'sent' : await r.text();
+      } catch (e) { results.kick = 'error: ' + e.message; }
     }
   }
 
@@ -372,6 +402,72 @@ app.get('/auth/youtube/callback', async (req, res) => {
     console.error('YouTube OAuth failed', e);
     const s = getSession(session);
     res.redirect(`${s && s.mobileRedirect}?platform=youtube&status=error`);
+  }
+});
+
+// ---------- Kick OAuth (requires PKCE) ----------
+function base64url(buf){ return buf.toString('base64').replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''); }
+
+app.get('/auth/kick/login', (req, res) => {
+  const session = req.query.session;
+  const mobileRedirect = req.query.redirect_uri;
+  if (!session || !getSession(session)) return res.status(400).send('Invalid session');
+
+  const codeVerifier = base64url(crypto.randomBytes(64));
+  const codeChallenge = base64url(crypto.createHash('sha256').update(codeVerifier).digest());
+  updateSession(session, { mobileRedirect, kickCodeVerifier: codeVerifier });
+
+  const params = new URLSearchParams({
+    response_type: 'code',
+    client_id: KICK_CLIENT_ID,
+    redirect_uri: KICK_REDIRECT_URI,
+    scope: 'user:read channel:read chat:write',
+    code_challenge: codeChallenge,
+    code_challenge_method: 'S256',
+    state: session
+  });
+  res.redirect(`https://id.kick.com/oauth/authorize?${params}`);
+});
+
+app.get('/auth/kick/callback', async (req, res) => {
+  const { code, state: session } = req.query;
+  if (!session || !getSession(session)) return res.status(400).send('Invalid session');
+  try {
+    const s = getSession(session);
+    const tokenRes = await fetch('https://id.kick.com/oauth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        client_id: KICK_CLIENT_ID,
+        client_secret: KICK_CLIENT_SECRET,
+        redirect_uri: KICK_REDIRECT_URI,
+        code_verifier: s.kickCodeVerifier,
+        code
+      })
+    });
+    const tokenData = await tokenRes.json();
+    if (!tokenData.access_token) throw new Error(JSON.stringify(tokenData));
+
+    const userRes = await fetch('https://api.kick.com/public/v1/users', {
+      headers: { 'Authorization': `Bearer ${tokenData.access_token}` }
+    });
+    const userData = await userRes.json();
+    const user = userData.data && userData.data[0];
+
+    if (s.dashboardUserId && user) {
+      linkPlatformConnection(s.dashboardUserId, 'kick', {
+        accessToken: tokenData.access_token,
+        refreshToken: tokenData.refresh_token,
+        platformUserId: user.user_id || user.id,
+        platformLogin: user.name || user.username
+      });
+    }
+    res.redirect(`${updateSession(session, {}).mobileRedirect}?platform=kick&status=success`);
+  } catch (e) {
+    console.error('Kick OAuth failed', e);
+    const s = getSession(session);
+    res.redirect(`${s && s.mobileRedirect}?platform=kick&status=error`);
   }
 });
 
