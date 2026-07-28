@@ -5,7 +5,7 @@ import Stripe from 'stripe';
 import crypto from 'crypto';
 import 'dotenv/config';
 import { createSession, getSession, updateSession, createAuthToken, getUserIdForToken, deleteAuthToken } from './lib/tokenStore.js';
-import { createUser, verifyUser, getUserById, publicUser, linkStripeCustomer, updateSubscriptionByStripeCustomer, linkPlatformConnection, getConnectionsForUser } from './lib/users.js';
+import { createUser, verifyUser, getUserById, publicUser, linkStripeCustomer, updateSubscriptionByStripeCustomer, linkPlatformConnection, getConnectionsForUser, deletePlatformConnection } from './lib/users.js';
 
 const app = express();
 app.use(cors());
@@ -121,6 +121,11 @@ app.post('/dashboard/connect-session', requireAuth, (req, res) => {
   const session = createSession();
   updateSession(session, { dashboardUserId: req.user.id });
   res.json({ session });
+});
+
+app.delete('/dashboard/connections/:platform', requireAuth, (req, res) => {
+  deletePlatformConnection(req.user.id, req.params.platform);
+  res.json({ ok: true });
 });
 
 app.get('/dashboard/data', requireAuth, async (req, res) => {
