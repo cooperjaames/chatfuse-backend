@@ -276,8 +276,11 @@ app.get('/dashboard/data', requireAuth, async (req, res) => {
   }
 
   out.totalViewers = (out.twitch.viewers || 0) + (out.youtube.viewers || 0) + (out.kick.viewers || 0);
-  out.totalFollowers = (out.twitch.followers || 0);
-  out.totalSubs = (out.twitch.subs || 0) + (out.youtube.subs || 0) + (out.kick.subs || 0);
+  // YouTube has no "followers" concept — its subscriber count is the closest
+  // equivalent, so it's folded into Followers rather than Sub Counts (which
+  // is reserved for actual paid subs: Twitch + Kick).
+  out.totalFollowers = (out.twitch.followers || 0) + (out.youtube.subs || 0);
+  out.totalSubs = (out.twitch.subs || 0) + (out.kick.subs || 0);
   res.json(out);
 });
 
