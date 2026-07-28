@@ -197,11 +197,12 @@ app.get('/dashboard/kick-categories', requireAuth, async (req, res) => {
   if (!conns.kick) return res.status(400).json({ error: 'Kick not connected' });
   const q = req.query.q || '';
   try {
-    const r = await fetch(`https://api.kick.com/public/v1/categories?search=${encodeURIComponent(q)}`, {
+    const r = await fetch(`https://api.kick.com/public/v1/categories?q=${encodeURIComponent(q)}&search=${encodeURIComponent(q)}`, {
       headers: { 'Authorization': `Bearer ${conns.kick.access_token}` }
     });
     const d = await r.json();
-    res.json({ categories: d.data || [] });
+    if (!Array.isArray(d.data)) console.error('Kick category search unexpected response:', JSON.stringify(d));
+    res.json({ categories: d.data || [], raw: d });
   } catch (e) {
     res.status(500).json({ error: 'Kick category search failed' });
   }
