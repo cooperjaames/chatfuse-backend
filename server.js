@@ -187,6 +187,21 @@ app.get('/dashboard/data', requireAuth, async (req, res) => {
   res.json(out);
 });
 
+app.get('/dashboard/kick-categories', requireAuth, async (req, res) => {
+  const conns = getConnectionsForUser(req.user.id);
+  if (!conns.kick) return res.status(400).json({ error: 'Kick not connected' });
+  const q = req.query.q || '';
+  try {
+    const r = await fetch(`https://api.kick.com/public/v1/categories?search=${encodeURIComponent(q)}`, {
+      headers: { 'Authorization': `Bearer ${conns.kick.access_token}` }
+    });
+    const d = await r.json();
+    res.json({ categories: d.data || [] });
+  } catch (e) {
+    res.status(500).json({ error: 'Kick category search failed' });
+  }
+});
+
 app.post('/dashboard/stream-info', requireAuth, async (req, res) => {
   const conns = getConnectionsForUser(req.user.id);
   const { twitch, youtube, kick } = req.body || {};
@@ -240,7 +255,9 @@ app.post('/dashboard/stream-info', requireAuth, async (req, res) => {
     try {
       const patch = {};
       if (kick.title) patch.stream_title = kick.title;
-      if (kick.category) {
+      if (kick.category_id) {
+        patch.category_id = kick.category_id;
+      } else if (kick.category) {
         const cr = await fetch(`https://api.kick.com/public/v1/categories?search=${encodeURIComponent(kick.category)}`, {
           headers: { 'Authorization': `Bearer ${conns.kick.access_token}` }
         });
@@ -519,7 +536,7 @@ app.get('/auth/kick/login', (req, res) => {
     response_type: 'code',
     client_id: KICK_CLIENT_ID,
     redirect_uri: KICK_REDIRECT_URI,
-    scope: 'user:read channel:read chat:write',
+    scope: 'user:read channel:read channel:write chat:write',
     code_challenge: codeChallenge,
     code_challenge_method: 'S256',
     state: session
