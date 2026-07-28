@@ -168,6 +168,52 @@ app.get('/dashboard/data', requireAuth, async (req, res) => {
   res.json(out);
 });
 
+app.post('/dashboard/send', requireAuth, async (req, res) => {
+  const { message, platform } = req.body || {};
+  if (!message || !message.trim()) return res.status(400).json({ error: 'Message is empty' });
+  const conns = getConnectionsForUser(req.user.id);
+  const targets = platform === 'all' ? ['twitch', 'youtube'] : [platform];
+  const results = {};
+
+  for (const p of targets) {
+    if (!conns[p]) { results[p] = 'not connected'; continue; }
+
+    if (p === 'twitch') {
+      try {
+        const r = await fetch('https://api.twitch.tv/helix/chat/messages', {
+          method: 'POST',
+          headers: { 'Client-ID': TWITCH_CLIENT_ID, 'Authorization': `Bearer ${conns.twitch.access_token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ broadcaster_id: conns.twitch.platform_user_id, sender_id: conns.twitch.platform_user_id, message })
+        });
+        results.twitch = r.ok ? 'sent' : await r.text();
+      } catch (e) { results.twitch = 'error: ' + e.message; }
+    }
+
+    if (p === 'youtube') {
+      try {
+        const br = await fetch('https://www.googleapis.com/youtube/v3/liveBroadcasts?part=snippet&broadcastStatus=active&broadcastType=all', {
+          headers: { 'Authorization': `Bearer ${conns.youtube.access_token}` }
+        });
+        const bd = await br.json();
+        const broadcast = bd.items && bd.items[0];
+        if (!broadcast) { results.youtube = 'not live'; continue; }
+        const vr = await fetch(`https://www.googleapis.com/youtube/v3/videos?part=liveStreamingDetails&id=${broadcast.id}&key=${YOUTUBE_API_KEY}`);
+        const vd = await vr.json();
+        const liveChatId = vd.items && vd.items[0] && vd.items[0].liveStreamingDetails && vd.items[0].liveStreamingDetails.activeLiveChatId;
+        if (!liveChatId) { results.youtube = 'no active chat'; continue; }
+        const r = await fetch('https://www.googleapis.com/youtube/v3/liveChat/messages?part=snippet', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${conns.youtube.access_token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ snippet: { liveChatId, type: 'textMessageEvent', textMessageDetails: { messageText: message } } })
+        });
+        results.youtube = r.ok ? 'sent' : await r.text();
+      } catch (e) { results.youtube = 'error: ' + e.message; }
+    }
+  }
+
+  res.json({ results });
+});
+
 // ---------- Stripe billing ----------
 app.post('/billing/checkout', requireAuth, async (req, res) => {
   if (!stripe) return res.status(500).json({ error: 'Billing is not configured yet' });
