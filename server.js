@@ -261,9 +261,11 @@ app.get('/dashboard/data', requireAuth, async (req, res) => {
       out.kick.startedAt = stream ? stream.started_at : null;
     } catch (e) { out.kick.error = 'Could not reach Kick'; }
 
-    // Kick's public API has no follower-count field at all (only
-    // active/canceled subscriber counts) — followers stays unavailable
-    // until Kick exposes it.
+    // Kick's official public API has no follower-count field (only
+    // active/canceled subscriber counts). A follower count does exist on
+    // kick.com's unofficial internal API, but Cloudflare blocks that
+    // endpoint for server-side requests — the frontend fetches it
+    // client-side instead and overrides this field.
     out.kick.followers = null;
     try {
       const cr = await fetch(`https://api.kick.com/public/v1/channels?broadcaster_user_id=${conns.kick.platform_user_id}`, {
@@ -278,7 +280,9 @@ app.get('/dashboard/data', requireAuth, async (req, res) => {
   out.totalViewers = (out.twitch.viewers || 0) + (out.youtube.viewers || 0) + (out.kick.viewers || 0);
   // YouTube has no "followers" concept — its subscriber count is the closest
   // equivalent, so it's folded into Followers rather than Sub Counts (which
-  // is reserved for actual paid subs: Twitch + Kick).
+  // is reserved for actual paid subs: Twitch + Kick). Kick's follower count
+  // isn't included here — the frontend adds it client-side (see kick.followers
+  // comment above) and recomputes this total after merging it in.
   out.totalFollowers = (out.twitch.followers || 0) + (out.youtube.subs || 0);
   out.totalSubs = (out.twitch.subs || 0) + (out.kick.subs || 0);
   res.json(out);
