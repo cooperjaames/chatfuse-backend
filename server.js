@@ -404,6 +404,94 @@ app.get('/dashboard/youtube-chat', requireAuth, async (req, res) => {
   }
 });
 
+// ---------- Channel Actions: Twitch chat settings + banned words ----------
+// Only Twitch has a public API for these (slow mode, followers/subscribers-
+// only, emote-only, blocked terms). Kick and YouTube don't expose any of
+// this for third-party apps to read or write, per their public API docs.
+app.get('/dashboard/chat-settings', requireAuth, async (req, res) => {
+  const conns = await getFreshConnections(req.user.id);
+  if (!conns.twitch) return res.status(400).json({ error: 'Twitch not connected' });
+  try {
+    const r = await fetch(`https://api.twitch.tv/helix/chat/settings?broadcaster_id=${conns.twitch.platform_user_id}&moderator_id=${conns.twitch.platform_user_id}`, {
+      headers: { 'Client-ID': TWITCH_CLIENT_ID, 'Authorization': `Bearer ${conns.twitch.access_token}` }
+    });
+    const d = await r.json();
+    if (!r.ok) return res.status(r.status).json({ error: d.message || 'Could not read chat settings' });
+    res.json(d.data && d.data[0] ? d.data[0] : {});
+  } catch (e) {
+    res.status(500).json({ error: 'Could not reach Twitch' });
+  }
+});
+
+app.post('/dashboard/chat-settings', requireAuth, async (req, res) => {
+  const conns = await getFreshConnections(req.user.id);
+  if (!conns.twitch) return res.status(400).json({ error: 'Twitch not connected' });
+  const allowed = ['slow_mode', 'slow_mode_wait_time', 'follower_mode', 'follower_mode_duration', 'subscriber_mode', 'emote_mode'];
+  const patch = {};
+  for (const key of allowed) if (req.body && req.body[key] !== undefined) patch[key] = req.body[key];
+  try {
+    const r = await fetch(`https://api.twitch.tv/helix/chat/settings?broadcaster_id=${conns.twitch.platform_user_id}&moderator_id=${conns.twitch.platform_user_id}`, {
+      method: 'PATCH',
+      headers: { 'Client-ID': TWITCH_CLIENT_ID, 'Authorization': `Bearer ${conns.twitch.access_token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch)
+    });
+    const d = await r.json();
+    if (!r.ok) return res.status(r.status).json({ error: d.message || 'Could not update chat settings' });
+    res.json(d.data && d.data[0] ? d.data[0] : {});
+  } catch (e) {
+    res.status(500).json({ error: 'Could not reach Twitch' });
+  }
+});
+
+app.get('/dashboard/banned-words', requireAuth, async (req, res) => {
+  const conns = await getFreshConnections(req.user.id);
+  if (!conns.twitch) return res.status(400).json({ error: 'Twitch not connected' });
+  try {
+    const r = await fetch(`https://api.twitch.tv/helix/moderation/blocked_terms?broadcaster_id=${conns.twitch.platform_user_id}&moderator_id=${conns.twitch.platform_user_id}&first=100`, {
+      headers: { 'Client-ID': TWITCH_CLIENT_ID, 'Authorization': `Bearer ${conns.twitch.access_token}` }
+    });
+    const d = await r.json();
+    if (!r.ok) return res.status(r.status).json({ error: d.message || 'Could not read banned words' });
+    res.json({ terms: d.data || [] });
+  } catch (e) {
+    res.status(500).json({ error: 'Could not reach Twitch' });
+  }
+});
+
+app.post('/dashboard/banned-words', requireAuth, async (req, res) => {
+  const conns = await getFreshConnections(req.user.id);
+  if (!conns.twitch) return res.status(400).json({ error: 'Twitch not connected' });
+  const { text } = req.body || {};
+  if (!text || !text.trim()) return res.status(400).json({ error: 'Term is empty' });
+  try {
+    const r = await fetch(`https://api.twitch.tv/helix/moderation/blocked_terms?broadcaster_id=${conns.twitch.platform_user_id}&moderator_id=${conns.twitch.platform_user_id}`, {
+      method: 'POST',
+      headers: { 'Client-ID': TWITCH_CLIENT_ID, 'Authorization': `Bearer ${conns.twitch.access_token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: text.trim() })
+    });
+    const d = await r.json();
+    if (!r.ok) return res.status(r.status).json({ error: d.message || 'Could not add term' });
+    res.json(d.data && d.data[0] ? d.data[0] : {});
+  } catch (e) {
+    res.status(500).json({ error: 'Could not reach Twitch' });
+  }
+});
+
+app.delete('/dashboard/banned-words/:id', requireAuth, async (req, res) => {
+  const conns = await getFreshConnections(req.user.id);
+  if (!conns.twitch) return res.status(400).json({ error: 'Twitch not connected' });
+  try {
+    const r = await fetch(`https://api.twitch.tv/helix/moderation/blocked_terms?broadcaster_id=${conns.twitch.platform_user_id}&moderator_id=${conns.twitch.platform_user_id}&id=${req.params.id}`, {
+      method: 'DELETE',
+      headers: { 'Client-ID': TWITCH_CLIENT_ID, 'Authorization': `Bearer ${conns.twitch.access_token}` }
+    });
+    if (!r.ok) { const d = await r.json().catch(() => ({})); return res.status(r.status).json({ error: d.message || 'Could not remove term' }); }
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: 'Could not reach Twitch' });
+  }
+});
+
 app.post('/dashboard/send', requireAuth, async (req, res) => {
   const { message, platform } = req.body || {};
   if (!message || !message.trim()) return res.status(400).json({ error: 'Message is empty' });
@@ -505,7 +593,7 @@ app.get('/auth/twitch/login', (req, res) => {
     client_id: TWITCH_CLIENT_ID,
     redirect_uri: TWITCH_REDIRECT_URI,
     response_type: 'code',
-    scope: 'user:write:chat user:read:chat channel:manage:broadcast moderator:read:followers channel:read:subscriptions',
+    scope: 'user:write:chat user:read:chat channel:manage:broadcast moderator:read:followers channel:read:subscriptions moderator:manage:chat_settings moderator:manage:blocked_terms',
     state: session
   });
   res.redirect(`https://id.twitch.tv/oauth2/authorize?${params}`);
