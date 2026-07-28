@@ -16,7 +16,7 @@ const {
   STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, STRIPE_PRICE_ID, DASHBOARD_URL
 } = process.env;
 
-const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
+const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY, { apiVersion: '2025-03-31.basil' }) : null;
 
 // Stripe webhook MUST come before express.json() below — Stripe verifies
 // the request signature against the raw, unparsed body. If express.json()
